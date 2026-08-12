@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Document Translator</title>
+
+<!-- Client-side libraries (need an internet connection to load) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js"></script>
+<script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
+
+<style>
+  :root{
+    --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --text:#e2e8f0;
+    --accent:#6366f1; --accent-2:#818cf8; --border:#334155; --ok:#22c55e; --err:#ef4444;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%);color:var(--text);
+    min-height:100vh;display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;}
+  .wrap{width:100%;max-width:660px;}
+  h1{font-size:26px;margin:0 0 4px;}
+  .sub{color:var(--muted);margin:0 0 22px;font-size:14px;line-height:1.5;}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;
+    box-shadow:0 20px 50px rgba(0,0,0,.35);}
+  label{display:block;font-size:13px;color:var(--muted);margin:0 0 6px;font-weight:600;}
+  .row{display:flex;gap:14px;margin-bottom:18px;}
+  .col{flex:1;}
+  select,.drop{width:100%;background:#0f172a;color:var(--text);border:1px solid var(--border);
+    border-radius:10px;padding:12px;font-size:14px;outline:none;}
+  select:focus{border-color:var(--accent);}
+  .drop{border-style:dashed;text-align:center;cursor:pointer;padding:28px 16px;transition:.15s;margin-bottom:8px;}
+  .drop:hover,.drop.hover{border-color:var(--accent-2);background:#131c33;}
+  .drop .big{font-size:15px;color:var(--text);margin-bottom:4px;}
+  .drop .small{font-size:12px;color:var(--muted);}
+  .filename{font-size:13px;color:var(--accent-2);margin:4px 0 6px;min-height:18px;}
+  .note{font-size:12px;color:#fde68a;margin:0 0 14px;min-height:0;}
+  .ocr-row{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:13px;color:var(--muted);}
+  .ocr-row input{width:16px;height:16px;accent-color:var(--accent);}
+  button{width:100%;background:var(--accent);color:#fff;border:none;border-radius:10px;padding:14px;
+    font-size:15px;font-weight:600;cursor:pointer;transition:.15s;}
+  button:hover:not(:disabled){background:var(--accent-2);}
+  button:disabled{opacity:.5;cursor:not-allowed;}
+  .status{margin-top:18px;font-size:14px;}
+  .bar{height:8px;background:#0f172a;border-radius:999px;overflow:hidden;margin:10px 0;border:1px solid var(--border);}
+  .bar>div{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .3s;}
+  .msg{font-size:13px;color:var(--muted);}
+  .msg.err{color:var(--err);}
+  a.dl{display:inline-block;margin-top:12px;background:var(--ok);color:#05240f;padding:12px 18px;
+    border-radius:10px;text-decoration:none;font-weight:700;font-size:14px;}
+  .warn{background:#422006;border:1px solid #854d0e;color:#fde68a;padding:10px 12px;border-radius:10px;
+    font-size:12px;margin-bottom:18px;line-height:1.5;}
+  .hidden{display:none;}
+  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:18px;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📄 Document Translator</h1>
+  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text. (PDFs and images are read with OCR and returned as a Word file that keeps the original page — background graphics and all — behind the translated text.)</p>
+
+  <div class="card">
+    <div id="libwarn" class="warn hidden"></div>
+
+    <div class="row">
+      <div class="col">
+        <label>From (source language)</label>
+        <select id="source"><option value="auto" selected>Auto-detect</option></select>
+      </div>
+      <div class="col">
+        <label>To (output language)</label>
+        <select id="target"></select>
+      </div>
+    </div>
+
+    <label>Document</label>
+    <div class="drop" id="drop">
+      <div class="big">Click to choose a file, or drag &amp; drop</div>
+      <div class="small">Word (.docx) · Excel (.xlsx) · Text (.txt) · PDF · Images (.png .jpg)</div>
+    </div>
+    <input type="file" id="file" class="hidden"
+      accept=".docx,.xlsx,.txt,.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.gif">
+    <div class="filename" id="filename"></div>
+    <div class="note" id="note"></div>
+
+    <div class="ocr-row">
+      <input type="checkbox" id="ocr" checked>
+      <span>Read text inside images &amp; scanned pages (OCR)</span>
+    </div>
+    <div class="ocr-row">
+      <input type="checkbox" id="keepbg" checked>
+      <span>For PDF &amp; images: keep the original page (background graphics) behind the translated text</span>
+    </div>
+
+    <button id="go" disabled>Translate &amp; download</button>
+
+    <div class="status hidden" id="status">
+      <div class="bar"><div id="fill"></div></div>
+      <div class="msg" id="msg"></div>
+      <a class="dl hidden" id="dl">⬇ Download translated file</a>
+    </div>
+  </div>
+
+  <div class="foot">
+    Runs entirely in your browser · Google Translate (free) &amp; Tesseract OCR<br>
+    Needs an internet connection (to load libraries and to translate).
+  </div>
+</div>
+
+<script>
+/* ===========================================================================
+   Language list (name, Google code)
+=========================================================================== */
+const LANGS = [["Afrikaans","af"],["Albanian","sq"],["Amharic","am"],["Arabic","ar"],["Armenian","hy"],["Assamese","as"],["Aymara","ay"],["Azerbaijani","az"],["Bambara","bm"],["Basque","eu"],["Belarusian","be"],["Bengali","bn"],["Bhojpuri","bho"],["Bosnian","bs"],["Bulgarian","bg"],["Catalan","ca"],["Cebuano","ceb"],["Chichewa","ny"],["Chinese (Simplified)","zh-CN"],["Chinese (Traditional)","zh-TW"],["Corsican","co"],["Croatian","hr"],["Czech","cs"],["Danish","da"],["Dhivehi","dv"],["Dogri","doi"],["Dutch","nl"],["English","en"],["Esperanto","eo"],["Estonian","et"],["Ewe","ee"],["Filipino","tl"],["Finnish","fi"],["French","fr"],["Frisian","fy"],["Galician","gl"],["Georgian","ka"],["German","de"],["Greek","el"],["Guarani","gn"],["Gujarati","gu"],["Haitian Creole","ht"],["Hausa","ha"],["Hawaiian","haw"],["Hebrew","iw"],["Hindi","hi"],["Hmong","hmn"],["Hungarian","hu"],["Icelandic","is"],["Igbo","ig"],["Ilocano","ilo"],["Indonesian","id"],["Irish","ga"],["Italian","it"],["Japanese","ja"],["Javanese","jw"],["Kannada","kn"],["Kazakh","kk"],["Khmer","km"],["Kinyarwanda","rw"],["Konkani","gom"],["Korean","ko"],["Krio","kri"],["Kurdish (Kurmanji)","ku"],["Kurdish (Sorani)","ckb"],["Kyrgyz","ky"],["Lao","lo"],["Latin","la"],["Latvian","lv"],["Lingala","ln"],["Lithuanian","lt"],["Luganda","lg"],["Luxembourgish","lb"],["Macedonian","mk"],["Maithili","mai"],["Malagasy","mg"],["Malay","ms"],["Malayalam","ml"],["Maltese","mt"],["Maori","mi"],["Marathi","mr"],["Meiteilon (Manipuri)","mni-Mtei"],["Mizo","lus"],["Mongolian","mn"],["Myanmar","my"],["Nepali","ne"],["Norwegian","no"],["Odia (Oriya)","or"],["Oromo","om"],["Pashto","ps"],["Persian","fa"],["Polish","pl"],["Portuguese","pt"],["Punjabi","pa"],["Quechua","qu"],["Romanian","ro"],["Russian","ru"],["Samoan","sm"],["Sanskrit","sa"],["Scots Gaelic","gd"],["Sepedi","nso"],["Serbian","sr"],["Sesotho","st"],["Shona","sn"],["Sindhi","sd"],["Sinhala","si"],["Slovak","sk"],["Slovenian","sl"],["Somali","so"],["Spanish","es"],["Sundanese","su"],["Swahili","sw"],["Swedish","sv"],["Tajik","tg"],["Tamil","ta"],["Tatar","tt"],["Telugu","te"],["Thai","th"],["Tigrinya","ti"],["Tsonga","ts"],["Turkish","tr"],["Turkmen","tk"],["Twi","ak"],["Ukrainian","uk"],["Urdu","ur"],["Uyghur","ug"],["Uzbek","uz"],["Vietnamese","vi"],["Welsh","cy"],["Xhosa","xh"],["Yiddish","yi"],["Yoruba","yo"],["Zulu","zu"]];
+
+/* Google code -> Tesseract OCR language code (common ones; falls back to eng) */
+const TESS = {en:"eng",es:"spa",fr:"fra",de:"deu",it:"ita",pt:"por",nl:"nld",ru:"rus",
+  "zh-CN":"chi_sim","zh-TW":"chi_tra",ja:"jpn",ko:"kor",ar:"ara",hi:"hin",bn:"ben",
+  ta:"tam",te:"tel",tr:"tur",pl:"pol",uk:"ukr",vi:"vie",th:"tha",el:"ell",iw:"heb",
+  fa:"fas",id:"ind",ms:"msa",sv:"swe",da:"dan",fi:"fin",no:"nor",cs:"ces",ro:"ron",
+  hu:"hun",bg:"bul",sr:"srp",hr:"hrv",sk:"slk",sl:"slv",lt:"lit",lv:"lav",et:"est",
+  ur:"urd",gu:"guj",kn:"kan",ml:"mal",mr:"mar",pa:"pan",ne:"nep",si:"sin",my:"mya",
+  km:"khm",lo:"lao",ka:"kat",hy:"hye",az:"aze",kk:"kaz",af:"afr"};
+
+const HAS_LETTER = /[\p{L}\p{N}]/u;   // does a string contain something translatable?
+
+/* ===========================================================================
+   Dropdowns
+=========================================================================== */
+const srcSel = document.getElementById("source");
+const tgtSel = document.getElementById("target");
+for (const [name, code] of LANGS) {
+  const o1 = document.createElement("option"); o1.value = code; o1.textContent = name; srcSel.appendChild(o1);
+  const o2 = document.createElement("option"); o2.value = code; o2.textContent = name;
+  if (code === "en") o2.selected = true;
+  tgtSel.appendChild(o2);
+}
+
+/* ===========================================================================
+   Library availability
+=========================================================================== */
+function missingLibs() {
+  const m = [];
+  if (typeof JSZip === "undefined") m.push("Word/Excel engine (JSZip)");
+  if (typeof pdfjsLib === "undefined") m.push("PDF reader (pdf.js)");
+  if (typeof Tesseract === "undefined") m.push("OCR (Tesseract.js)");
+  if (typeof docx === "undefined") m.push("Word writer (docx)");
+  return m;
+}
+window.addEventListener("load", () => {
+  if (typeof pdfjsLib !== "undefined")
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const miss = missingLibs();
+  if (miss.length) {
+    const w = document.getElementById("libwarn");
+    w.classList.remove("hidden");
+    w.innerHTML = "⚠️ Some components didn't load: <b>" + miss.join(", ") +
+      "</b>.<br>Check your internet connection and reload the page.";
+  }
+});
+
+/* ===========================================================================
+   Translation (Google free endpoint, MyMemory fallback) + cache + pool
+=========================================================================== */
+const CACHE = new Map();
+const MAX_CHARS = 4500;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function splitText(text, limit) {
+  const parts = []; let rem = text;
+  while (rem.length > limit) {
+    const win = rem.slice(0, limit);
+    let cut = Math.max(win.lastIndexOf("\n"), win.lastIndexOf(". "),
+                       win.lastIndexOf("! "), win.lastIndexOf("? "), win.lastIndexOf(" "));
+    if (cut <= 0) cut = limit;
+    parts.push(rem.slice(0, cut)); rem = rem.slice(cut);
+  }
+  if (rem) parts.push(rem);
+  return parts;
+}
+async function googleChunk(text, sl, tl) {
+  const url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=" +
+    encodeURIComponent(sl) + "&tl=" + encodeURIComponent(tl) + "&dt=t&q=" + encodeURIComponent(text);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("Google HTTP " + r.status);
+  const data = await r.json();
+  return (data[0] || []).map(seg => seg[0]).join("");
+}
+async function myMemoryChunk(text, sl, tl) {
+  const src = (sl === "auto") ? "en" : sl;
+  const url = "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text) +
+    "&langpair=" + encodeURIComponent(src) + "|" + encodeURIComponent(tl);
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("MyMemory HTTP " + r.status);
+  const j = await r.json();
+  if (j.responseData && j.responseData.translatedText) return j.responseData.translatedText;
+  throw new Error("no translation");
+}
+async function translateOnce(text, sl, tl) {
+  for (let a = 0; a < 2; a++) {
+    try { return await googleChunk(text, sl, tl); }
+    catch (e) { await sleep(500 * (a + 1)); }
+  }
+  return await myMemoryChunk(text, sl, tl);  // fallback (throws if it also fails)
+}
+async function translate(text, sl, tl) {
+  if (text == null) return "";
+  if (!text.trim()) return text;
+  const key = sl + "|" + tl + "|" + text;
+  if (CACHE.has(key)) return CACHE.get(key);
+
+  const stripped = text.trim();
+  const lead = text.slice(0, text.length - text.replace(/^\s+/, "").length);
+  const trail = text.slice(text.replace(/\s+$/, "").length);
+
+  let core;
+  if (stripped.length <= MAX_CHARS) core = await translateOnce(stripped, sl, tl);
+  else {
+    const parts = splitText(stripped, MAX_CHARS), res = [];
+    for (const p of parts) res.push(await translateOnce(p, sl, tl));
+    core = res.join("");
+  }
+  const result = lead + core + trail;
+  CACHE.set(key, result);
+  return result;
+}
+/* Concurrency pool — translate several nodes at once but stay gentle. */
+async function pool(items, size, fn) {
+  let i = 0;
+  const n = Math.min(size, items.length);
+  const workers = Array.from({ length: n }, async () => {
+    while (i < items.length) { const idx = i++; await fn(items[idx], idx); }
+  });
+  await Promise.all(workers);
+}
+
+/* ===========================================================================
+   Shared helpers
+=========================================================================== */
+function readArrayBuffer(file) {
+  return new Promise((res, rej) => { const fr = new FileReader();
+    fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsArrayBuffer(file); });
+}
+function readText(file) {
+  return new Promise((res, rej) => { const fr = new FileReader();
+    fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsText(file); });
+}
+function ocrLang() { const s = srcSel.value; return (s !== "auto" && TESS[s]) ? TESS[s] : "eng"; }
+function parseXml(str) {
+  const doc = new DOMParser().parseFromString(str, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length) throw new Error("Could not read the file's internal XML.");
+  return doc;
+}
+
+/* ===========================================================================
+   IN-PLACE translation for .docx  (edit <w:t> text nodes inside the zip)
+   Everything else in the package — styles, layout, images, tables — is
+   left byte-for-byte untouched, so formatting is preserved exactly.
+=========================================================================== */
+async function translateDocxInPlace(file, sl, tl, onProgress, setMsg) {
+  setMsg("Opening document…");
+  const zip = await JSZip.loadAsync(await readArrayBuffer(file));
+
+  // Parts that carry body/header/footer/footnote text.
+  const partNames = Object.keys(zip.files).filter(n =>
+    /^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$/.test(n));
+
+  const docs = {};
+  const nodes = [];
+  for (const name of partNames) {
+    const doc = parseXml(await zip.file(name).async("string"));
+    docs[name] = doc;
+    const t = doc.getElementsByTagName("w:t");
+    for (let i = 0; i < t.length; i++) nodes.push(t[i]);
+  }
+  const targets = nodes.filter(n => HAS_LETTER.test(n.textContent || ""));
+  const total = Math.max(targets.length, 1);
+  let done = 0;
+
+  setMsg("Translating…");
+  await pool(targets, 4, async (node) => {
+    node.textContent = await translate(node.textContent, sl, tl);
+    done++; onProgress(done, total);
+  });
+
+  setMsg("Saving document…");
+  const ser = new XMLSerializer();
+  for (const name of partNames) zip.file(name, ser.serializeToString(docs[name]));
+  return await zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  });
+}
+
+/* ===========================================================================
+   IN-PLACE translation for .xlsx  (edit <t> text nodes inside the zip)
+   Numbers, formulas, styles, colours, column widths are all preserved.
+=========================================================================== */
+async function translateXlsxInPlace(file, sl, tl, onProgress, setMsg) {
+  setMsg("Opening spreadsheet…");
+  const zip = await JSZip.loadAsync(await readArrayBuffer(file));
+
+  // Shared strings hold most cell text; worksheet XML can hold inline strings.
+  const partNames = Object.keys(zip.files).filter(n =>
+    n === "xl/sharedStrings.xml" || /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+
+  const docs = {};
+  const nodes = [];
+  for (const name of partNames) {
+    const doc = parseXml(await zip.file(name).async("string"));
+    docs[name] = doc;
+    const t = doc.getElementsByTagName("t");   // <t> in sharedStrings and inline <is><t>
+    for (let i = 0; i < t.length; i++) nodes.push(t[i]);
+  }
+  const targets = nodes.filter(n => HAS_LETTER.test(n.textContent || ""));
+  const total = Math.max(targets.length, 1);
+  let done = 0;
+
+  setMsg("Translating cells…");
+  await pool(targets, 4, async (node) => {
+    node.textContent = await translate(node.textContent, sl, tl);
+    done++; onProgress(done, total);
+  });
+
+  setMsg("Saving spreadsheet…");
+  const ser = new XMLSerializer();
+  for (const name of partNames) zip.file(name, ser.serializeToString(docs[name]));
+  return await zip.generateAsync({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+}
+
+/* ===========================================================================
+   TXT -> TXT  (translate line by line, keep the exact line structure)
+=========================================================================== */
+async function translateTxt(file, sl, tl, onProgress, setMsg) {
+  setMsg("Reading text…");
+  const text = await readText(file);
+  const lines = text.split(/\r\n|\r|\n/);
+  const idxs = lines.map((l, i) => HAS_LETTER.test(l) ? i : -1).filter(i => i >= 0);
+  const total = Math.max(idxs.length, 1);
+  let done = 0;
+  setMsg("Translating…");
+  await pool(idxs, 4, async (i) => {
+    lines[i] = await translate(lines[i], sl, tl);
+    done++; onProgress(done, total);
+  });
+  return new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+}
+
+/* ===========================================================================
+   PDF / image -> Word.
+   Each page is captured as an image so the ORIGINAL page (background graphics,
+   logos, letterhead, layout) is preserved as the page background, and the
+   translated text is placed on top. The background is lightened slightly so
+   the translated text stays easy to read.
+=========================================================================== */
+function toParagraphs(text) {
+  text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const chunks = text.split(/\n\s*\n/).map(c => c.trim()).filter(Boolean);
+  return chunks.length ? chunks : (text.trim() ? [text.trim()] : []);
+}
+function canvasToPngU8(canvas) {
+  return new Promise((res, rej) => canvas.toBlob(
+    b => b ? b.arrayBuffer().then(ab => res(new Uint8Array(ab))) : rej(new Error("canvas export failed")),
+    "image/png"));
+}
+function fadeCanvas(ctx, w, h, alpha) { ctx.fillStyle = "rgba(255,255,255," + alpha + ")"; ctx.fillRect(0, 0, w, h); }
+
+async function extractPdfPages(file, useOcr, keepBg, setMsg) {
+  const pdf = await pdfjsLib.getDocument({ data: await readArrayBuffer(file) }).promise;
+  const pages = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    setMsg("Reading PDF page " + n + " / " + pdf.numPages + "…");
+    const page = await pdf.getPage(n);
+    const vp1 = page.getViewport({ scale: 1 });
+
+    // Text (extracted, or OCR for scanned pages)
+    const tc = await page.getTextContent();
+    let text = "";
+    tc.items.forEach(it => { text += it.str; if (it.hasEOL) text += "\n"; });
+    let texts;
+    if (text.trim()) texts = toParagraphs(text);
+    else if (useOcr && typeof Tesseract !== "undefined") {
+      setMsg("OCR on scanned page " + n + " / " + pdf.numPages + "…");
+      const vpo = page.getViewport({ scale: 2.5 });
+      const c = document.createElement("canvas"); c.width = vpo.width; c.height = vpo.height;
+      await page.render({ canvasContext: c.getContext("2d"), viewport: vpo }).promise;
+      const { data: { text: o } } = await Tesseract.recognize(c, ocrLang());
+      texts = toParagraphs(o);
+    } else texts = [];
+
+    // Background image of the original page
+    let img = null;
+    if (keepBg) {
+      setMsg("Capturing page " + n + " background…");
+      const vpr = page.getViewport({ scale: 2 });
+      const canvas = document.createElement("canvas"); canvas.width = vpr.width; canvas.height = vpr.height;
+      const ctx = canvas.getContext("2d");
+      await page.render({ canvasContext: ctx, viewport: vpr }).promise;
+      fadeCanvas(ctx, canvas.width, canvas.height, 0.5);
+      img = await canvasToPngU8(canvas);
+    }
+    pages.push({
+      img, texts, index: n,
+      wPx: Math.round(vp1.width * 96 / 72), hPx: Math.round(vp1.height * 96 / 72),
+      wTwips: Math.round(vp1.width * 20), hTwips: Math.round(vp1.height * 20),
+    });
+  }
+  return pages;
+}
+
+async function extractImagePages(file, useOcr, keepBg, setMsg) {
+  if (!(useOcr && typeof Tesseract !== "undefined"))
+    throw new Error("This is an image but OCR is turned off or didn't load.");
+  setMsg("Running OCR on image…");
+  const { data: { text } } = await Tesseract.recognize(file, ocrLang());
+  const texts = toParagraphs(text);
+
+  let img = null, wPx = 800, hPx = 1000;
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    wPx = image.naturalWidth || 800; hPx = image.naturalHeight || 1000;
+    if (keepBg) {
+      const canvas = document.createElement("canvas"); canvas.width = wPx; canvas.height = hPx;
+      const ctx = canvas.getContext("2d"); ctx.drawImage(image, 0, 0);
+      fadeCanvas(ctx, wPx, hPx, 0.5);
+      img = await canvasToPngU8(canvas);
+    }
+  } finally { URL.revokeObjectURL(url); }
+
+  return [{
+    img, texts: texts.length ? texts : ["[No readable text detected]"], index: 1,
+    wPx, hPx, wTwips: Math.round(wPx * 15), hTwips: Math.round(hPx * 15),
+  }];
+}
+
+function makePara(text, opts) {
+  const lines = String(text).split("\n"); const children = [];
+  lines.forEach((ln, i) => { if (i > 0) children.push(new docx.TextRun({ break: 1 })); children.push(new docx.TextRun(ln)); });
+  return new docx.Paragraph(Object.assign({ children }, opts || {}));
+}
+
+async function buildDocxFromPages(pages, sl, tl, keepBg, onProgress, setMsg) {
+  const total = Math.max(pages.reduce((s, p) => s + p.texts.length, 0), 1);
+  let done = 0;
+  const sections = [];
+
+  for (const p of pages) {
+    const translated = [];
+    for (const t of p.texts) { translated.push(await translate(t, sl, tl)); done++; onProgress(done, total); }
+    setMsg("Building Word page " + p.index + " / " + pages.length + "…");
+
+    const children = [];
+    let properties = {};
+    if (keepBg && p.img) {
+      children.push(new docx.Paragraph({ children: [new docx.ImageRun({
+        data: p.img,
+        transformation: { width: p.wPx, height: p.hPx },
+        floating: {
+          horizontalPosition: { relative: docx.HorizontalPositionRelativeFrom.PAGE, offset: 0 },
+          verticalPosition: { relative: docx.VerticalPositionRelativeFrom.PAGE, offset: 0 },
+          behindDocument: true,
+          wrap: { type: docx.TextWrappingType.NONE },
+        },
+      })] }));
+      properties = { page: { size: { width: p.wTwips, height: p.hTwips }, margin: { top: 720, bottom: 720, left: 720, right: 720 } } };
+    } else {
+      children.push(new docx.Paragraph({ text: "Page " + p.index, heading: docx.HeadingLevel.HEADING_2 }));
+    }
+
+    if (!translated.length) children.push(new docx.Paragraph({ text: "" }));
+    for (const t of translated) children.push(makePara(t));
+
+    sections.push({ properties, children });
+  }
+
+  setMsg("Finalising Word document…");
+  const doc = new docx.Document({ sections });
+  return await docx.Packer.toBlob(doc);
+}
+
+/* ===========================================================================
+   UI wiring
+=========================================================================== */
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("file");
+const filenameEl = document.getElementById("filename");
+const noteEl = document.getElementById("note");
+const go = document.getElementById("go");
+const statusBox = document.getElementById("status");
+const fill = document.getElementById("fill");
+const msgEl = document.getElementById("msg");
+const dl = document.getElementById("dl");
+let chosen = null, lastUrl = null;
+
+const IMG_EXT = [".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"];
+function extOf(name) { return name.slice(name.lastIndexOf(".")).toLowerCase(); }
+
+drop.addEventListener("click", () => fileInput.click());
+["dragover", "dragenter"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add("hover"); }));
+["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove("hover"); }));
+drop.addEventListener("drop", ev => { if (ev.dataTransfer.files.length) setFile(ev.dataTransfer.files[0]); });
+fileInput.addEventListener("change", () => { if (fileInput.files.length) setFile(fileInput.files[0]); });
+
+function setFile(f) {
+  chosen = f;
+  filenameEl.textContent = "📎 " + f.name;
+  const ext = extOf(f.name);
+  if (ext === ".pdf" || IMG_EXT.includes(ext))
+    noteEl.textContent = "Returned as a Word (.docx) file, with the original page kept as the background.";
+  else if (ext === ".docx" || ext === ".xlsx" || ext === ".txt")
+    noteEl.textContent = "Original formatting will be preserved — same file type out.";
+  else noteEl.textContent = "";
+  go.disabled = false;
+}
+function setMsg(t) { msgEl.textContent = t; }
+function setErr(t) { msgEl.classList.add("err"); msgEl.textContent = "❌ " + t; fill.style.width = "0%"; go.disabled = false; }
+function setProgress(done, total) {
+  const pct = Math.min(100, Math.round(100 * done / total));
+  fill.style.width = pct + "%";
+  msgEl.classList.remove("err");
+  setMsg("Translating… " + done + " / " + total + " segments (" + pct + "%)");
+}
+
+go.addEventListener("click", async () => {
+  if (!chosen) return;
+  go.disabled = true;
+  statusBox.classList.remove("hidden");
+  dl.classList.add("hidden");
+  msgEl.classList.remove("err");
+  fill.style.width = "0%";
+  if (lastUrl) { URL.revokeObjectURL(lastUrl); lastUrl = null; }
+
+  const sl = srcSel.value, tl = tgtSel.value;
+  if (sl !== "auto" && sl === tl) return setErr("Source and target languages are the same.");
+
+  const name = chosen.name, ext = extOf(name);
+  const base = name.slice(0, name.lastIndexOf(".")) || "document";
+
+  try {
+    let blob, outName;
+    if (ext === ".docx") {
+      if (typeof JSZip === "undefined") throw new Error("The Word engine didn't load.");
+      blob = await translateDocxInPlace(chosen, sl, tl, setProgress, setMsg);
+      outName = base + "_" + tl + ".docx";
+    } else if (ext === ".xlsx") {
+      if (typeof JSZip === "undefined") throw new Error("The Excel engine didn't load.");
+      blob = await translateXlsxInPlace(chosen, sl, tl, setProgress, setMsg);
+      outName = base + "_" + tl + ".xlsx";
+    } else if (ext === ".txt") {
+      blob = await translateTxt(chosen, sl, tl, setProgress, setMsg);
+      outName = base + "_" + tl + ".txt";
+    } else if (ext === ".pdf") {
+      const useOcr = document.getElementById("ocr").checked;
+      const keepBg = document.getElementById("keepbg").checked;
+      const pages = await extractPdfPages(chosen, useOcr, keepBg, setMsg);
+      blob = await buildDocxFromPages(pages, sl, tl, keepBg, setProgress, setMsg);
+      outName = base + "_" + tl + ".docx";
+    } else if (IMG_EXT.includes(ext)) {
+      const useOcr = document.getElementById("ocr").checked;
+      const keepBg = document.getElementById("keepbg").checked;
+      const pages = await extractImagePages(chosen, useOcr, keepBg, setMsg);
+      blob = await buildDocxFromPages(pages, sl, tl, keepBg, setProgress, setMsg);
+      outName = base + "_" + tl + ".docx";
+    } else if (ext === ".doc" || ext === ".xls") {
+      throw new Error("Old ." + ext.slice(1) + " format isn't supported — please save as ." + ext.slice(1) + "x first.");
+    } else {
+      throw new Error("Unsupported file type: " + ext);
+    }
+
+    lastUrl = URL.createObjectURL(blob);
+    dl.href = lastUrl; dl.download = outName; dl.classList.remove("hidden");
+    fill.style.width = "100%";
+    msgEl.classList.remove("err");
+    setMsg("✅ Done — " + outName);
+    go.disabled = false;
+    dl.click();  // auto-download
+  } catch (e) {
+    console.error(e);
+    setErr((e && e.message) ? e.message : String(e));
+  }
+});
+</script>
+</body>
+</html>
