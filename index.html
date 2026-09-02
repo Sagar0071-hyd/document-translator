@@ -9,7 +9,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js"></script>
-<script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <style>
   :root{
@@ -59,7 +59,7 @@
 <body>
 <div class="wrap">
   <h1>📄 Document Translator</h1>
-  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text. (PDFs and images are read with OCR and returned as a Word file that keeps the original page — background graphics and all — behind the translated text.)</p>
+  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, graphics, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text, <b>PDF stays PDF, images stay images</b>. For PDFs and images the words are read with OCR, erased, and the translation is painted back into the same spot on the page.</p>
 
   <div class="card">
     <div id="libwarn" class="warn hidden"></div>
@@ -87,11 +87,7 @@
 
     <div class="ocr-row">
       <input type="checkbox" id="ocr" checked>
-      <span>Read text inside images &amp; scanned pages (OCR)</span>
-    </div>
-    <div class="ocr-row">
-      <input type="checkbox" id="keepbg" checked>
-      <span>For PDF &amp; images: keep the original page (background graphics) behind the translated text</span>
+      <span>Read text inside images &amp; scanned pages (OCR) — required for PDF &amp; image files</span>
     </div>
 
     <button id="go" disabled>Translate &amp; download</button>
@@ -146,7 +142,7 @@ function missingLibs() {
   if (typeof JSZip === "undefined") m.push("Word/Excel engine (JSZip)");
   if (typeof pdfjsLib === "undefined") m.push("PDF reader (pdf.js)");
   if (typeof Tesseract === "undefined") m.push("OCR (Tesseract.js)");
-  if (typeof docx === "undefined") m.push("Word writer (docx)");
+  if (typeof window.jspdf === "undefined") m.push("PDF writer (jsPDF)");
   return m;
 }
 window.addEventListener("load", () => {
@@ -353,136 +349,155 @@ async function translateTxt(file, sl, tl, onProgress, setMsg) {
 }
 
 /* ===========================================================================
-   PDF / image -> Word.
-   Each page is captured as an image so the ORIGINAL page (background graphics,
-   logos, letterhead, layout) is preserved as the page background, and the
-   translated text is placed on top. The background is lightened slightly so
-   the translated text stays easy to read.
+   PDF / image -> same file type, translated IN PLACE.
+   The page is rendered to a canvas, OCR finds each line and its box, the
+   original words are painted over with the local background colour, and the
+   translated words are drawn back into the same box. The picture, layout,
+   colours and graphics are untouched — only the text changes. PDF comes back
+   as PDF, an image comes back as the same image type.
 =========================================================================== */
-function toParagraphs(text) {
-  text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const chunks = text.split(/\n\s*\n/).map(c => c.trim()).filter(Boolean);
-  return chunks.length ? chunks : (text.trim() ? [text.trim()] : []);
-}
-function canvasToPngU8(canvas) {
-  return new Promise((res, rej) => canvas.toBlob(
-    b => b ? b.arrayBuffer().then(ab => res(new Uint8Array(ab))) : rej(new Error("canvas export failed")),
-    "image/png"));
-}
-function fadeCanvas(ctx, w, h, alpha) { ctx.fillStyle = "rgba(255,255,255," + alpha + ")"; ctx.fillRect(0, 0, w, h); }
 
-async function extractPdfPages(file, useOcr, keepBg, setMsg) {
-  const pdf = await pdfjsLib.getDocument({ data: await readArrayBuffer(file) }).promise;
-  const pages = [];
-  for (let n = 1; n <= pdf.numPages; n++) {
-    setMsg("Reading PDF page " + n + " / " + pdf.numPages + "…");
-    const page = await pdf.getPage(n);
-    const vp1 = page.getViewport({ scale: 1 });
+const rgbStr = a => "rgb(" + a[0] + "," + a[1] + "," + a[2] + ")";
 
-    // Text (extracted, or OCR for scanned pages)
-    const tc = await page.getTextContent();
-    let text = "";
-    tc.items.forEach(it => { text += it.str; if (it.hasEOL) text += "\n"; });
-    let texts;
-    if (text.trim()) texts = toParagraphs(text);
-    else if (useOcr && typeof Tesseract !== "undefined") {
-      setMsg("OCR on scanned page " + n + " / " + pdf.numPages + "…");
-      const vpo = page.getViewport({ scale: 2.5 });
-      const c = document.createElement("canvas"); c.width = vpo.width; c.height = vpo.height;
-      await page.render({ canvasContext: c.getContext("2d"), viewport: vpo }).promise;
-      const { data: { text: o } } = await Tesseract.recognize(c, ocrLang());
-      texts = toParagraphs(o);
-    } else texts = [];
-
-    // Background image of the original page
-    let img = null;
-    if (keepBg) {
-      setMsg("Capturing page " + n + " background…");
-      const vpr = page.getViewport({ scale: 2 });
-      const canvas = document.createElement("canvas"); canvas.width = vpr.width; canvas.height = vpr.height;
-      const ctx = canvas.getContext("2d");
-      await page.render({ canvasContext: ctx, viewport: vpr }).promise;
-      fadeCanvas(ctx, canvas.width, canvas.height, 0.5);
-      img = await canvasToPngU8(canvas);
-    }
-    pages.push({
-      img, texts, index: n,
-      wPx: Math.round(vp1.width * 96 / 72), hPx: Math.round(vp1.height * 96 / 72),
-      wTwips: Math.round(vp1.width * 20), hTwips: Math.round(vp1.height * 20),
-    });
+/* Sample the background colour around a text box (its border pixels). Returns [r,g,b]. */
+function sampleBgColor(ctx, x0, y0, x1, y1) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const cx = x => Math.max(0, Math.min(W - 1, x | 0));
+  const cy = y => Math.max(0, Math.min(H - 1, y | 0));
+  const pts = [[x0, y0 - 1], [x1 - 1, y0 - 1], [x0, y1 + 1], [x1 - 1, y1 + 1],
+               [(x0 + x1) >> 1, y0 - 1], [(x0 + x1) >> 1, y1 + 1], [x0 - 1, (y0 + y1) >> 1], [x1 + 1, (y0 + y1) >> 1]];
+  let r = 0, g = 0, b = 0, n = 0;
+  for (const [px, py] of pts) {
+    try { const d = ctx.getImageData(cx(px), cy(py), 1, 1).data; r += d[0]; g += d[1]; b += d[2]; n++; } catch (e) {}
   }
-  return pages;
+  if (!n) return [255, 255, 255];
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
 }
 
-async function extractImagePages(file, useOcr, keepBg, setMsg) {
-  if (!(useOcr && typeof Tesseract !== "undefined"))
-    throw new Error("This is an image but OCR is turned off or didn't load.");
-  setMsg("Running OCR on image…");
-  const { data: { text } } = await Tesseract.recognize(file, ocrLang());
-  const texts = toParagraphs(text);
-
-  let img = null, wPx = 800, hPx = 1000;
-  const url = URL.createObjectURL(file);
-  try {
-    const image = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-    wPx = image.naturalWidth || 800; hPx = image.naturalHeight || 1000;
-    if (keepBg) {
-      const canvas = document.createElement("canvas"); canvas.width = wPx; canvas.height = hPx;
-      const ctx = canvas.getContext("2d"); ctx.drawImage(image, 0, 0);
-      fadeCanvas(ctx, wPx, hPx, 0.5);
-      img = await canvasToPngU8(canvas);
-    }
-  } finally { URL.revokeObjectURL(url); }
-
-  return [{
-    img, texts: texts.length ? texts : ["[No readable text detected]"], index: 1,
-    wPx, hPx, wTwips: Math.round(wPx * 15), hTwips: Math.round(hPx * 15),
-  }];
+/* Text colour = the pixel inside the box that contrasts most with the background.
+   Works for dark-on-light, light-on-dark, and coloured text. Returns [r,g,b]. */
+function sampleTextColor(ctx, x0, y0, x1, y1, bg) {
+  const w = Math.max(1, x1 - x0), h = Math.max(1, y1 - y0);
+  let data;
+  try { data = ctx.getImageData(x0, y0, w, h).data; } catch (e) { return [20, 20, 20]; }
+  let best = -1, cr = bg[0], cg = bg[1], cb = bg[2];
+  for (let i = 0; i < data.length; i += 4) {
+    const dr = data[i] - bg[0], dg = data[i + 1] - bg[1], db = data[i + 2] - bg[2];
+    const dist = dr * dr + dg * dg + db * db;
+    if (dist > best) { best = dist; cr = data[i]; cg = data[i + 1]; cb = data[i + 2]; }
+  }
+  return [cr, cg, cb];
 }
 
-function makePara(text, opts) {
-  const lines = String(text).split("\n"); const children = [];
-  lines.forEach((ln, i) => { if (i > 0) children.push(new docx.TextRun({ break: 1 })); children.push(new docx.TextRun(ln)); });
-  return new docx.Paragraph(Object.assign({ children }, opts || {}));
+/* Pull line objects ({bbox,text}) out of Tesseract data across versions. */
+function ocrLines(data) {
+  if (data.lines && data.lines.length) return data.lines;
+  const out = [];
+  for (const bl of (data.blocks || []))
+    for (const par of (bl.paragraphs || []))
+      for (const ln of (par.lines || [])) out.push(ln);
+  return out;
 }
 
-async function buildDocxFromPages(pages, sl, tl, keepBg, onProgress, setMsg) {
-  const total = Math.max(pages.reduce((s, p) => s + p.texts.length, 0), 1);
+/* OCR a canvas (using a shared worker), erase each line, redraw its translation. */
+async function inpaintCanvas(canvas, worker, sl, tl, onProgress, setMsg) {
+  setMsg("Reading the page (OCR)…");
+  const { data } = await worker.recognize(canvas, {}, { blocks: true });
+  const lines = ocrLines(data).filter(l => l && l.bbox && HAS_LETTER.test(l.text || ""));
+  const total = Math.max(lines.length, 1);
   let done = 0;
-  const sections = [];
 
-  for (const p of pages) {
-    const translated = [];
-    for (const t of p.texts) { translated.push(await translate(t, sl, tl)); done++; onProgress(done, total); }
-    setMsg("Building Word page " + p.index + " / " + pages.length + "…");
+  // Translate every line first (concurrently), preserving order.
+  const translations = new Array(lines.length);
+  setMsg("Translating…");
+  await pool(lines.map((_, i) => i), 4, async (i) => {
+    const src = (lines[i].text || "").replace(/\s+/g, " ").trim();
+    translations[i] = (await translate(src, sl, tl)).trim();
+    done++; onProgress(done, total);
+  });
 
-    const children = [];
-    let properties = {};
-    if (keepBg && p.img) {
-      children.push(new docx.Paragraph({ children: [new docx.ImageRun({
-        data: p.img,
-        transformation: { width: p.wPx, height: p.hPx },
-        floating: {
-          horizontalPosition: { relative: docx.HorizontalPositionRelativeFrom.PAGE, offset: 0 },
-          verticalPosition: { relative: docx.VerticalPositionRelativeFrom.PAGE, offset: 0 },
-          behindDocument: true,
-          wrap: { type: docx.TextWrappingType.NONE },
-        },
-      })] }));
-      properties = { page: { size: { width: p.wTwips, height: p.hTwips }, margin: { top: 720, bottom: 720, left: 720, right: 720 } } };
-    } else {
-      children.push(new docx.Paragraph({ text: "Page " + p.index, heading: docx.HeadingLevel.HEADING_2 }));
-    }
+  // Paint over the originals and draw the translations.
+  const ctx = canvas.getContext("2d");
+  const family = 'Arial, "Helvetica Neue", "Noto Sans", "Segoe UI", sans-serif';
+  for (let i = 0; i < lines.length; i++) {
+    const b = lines[i].bbox;
+    const x0 = b.x0, y0 = b.y0, x1 = b.x1, y1 = b.y1;
+    const boxW = x1 - x0, boxH = y1 - y0;
+    const txt = translations[i];
+    if (boxW <= 1 || boxH <= 1 || !txt) continue;
 
-    if (!translated.length) children.push(new docx.Paragraph({ text: "" }));
-    for (const t of translated) children.push(makePara(t));
+    const bg = sampleBgColor(ctx, x0, y0, x1, y1);
+    const fg = sampleTextColor(ctx, x0, y0, x1, y1, bg);
 
-    sections.push({ properties, children });
+    ctx.fillStyle = rgbStr(bg);
+    ctx.fillRect(x0 - 1, y0 - 1, boxW + 2, boxH + 2);
+
+    let fontSize = Math.max(6, Math.floor(boxH * 0.82));
+    ctx.fillStyle = rgbStr(fg);
+    ctx.textBaseline = "bottom";
+    ctx.font = fontSize + "px " + family;
+    let w = ctx.measureText(txt).width;
+    while (w > boxW && fontSize > 6) { fontSize--; ctx.font = fontSize + "px " + family; w = ctx.measureText(txt).width; }
+    ctx.fillText(txt, x0, y1);
   }
+  return canvas;
+}
 
-  setMsg("Finalising Word document…");
-  const doc = new docx.Document({ sections });
-  return await docx.Packer.toBlob(doc);
+/* PDF -> PDF: every page rebuilt with text translated in place. */
+async function makeOcrWorker(setMsg) {
+  setMsg("Starting OCR engine…");
+  return await Tesseract.createWorker(ocrLang());
+}
+
+async function translatePdfInPlace(file, sl, tl, setProgress, setMsg) {
+  const pdf = await pdfjsLib.getDocument({ data: await readArrayBuffer(file) }).promise;
+  const { jsPDF } = window.jspdf;
+  const scale = 2;                 // render resolution for OCR quality
+  let doc = null, pagesDone = 0;
+  const worker = await makeOcrWorker(setMsg);
+  try {
+    for (let n = 1; n <= pdf.numPages; n++) {
+      setMsg("Rendering page " + n + " / " + pdf.numPages + "…");
+      const page = await pdf.getPage(n);
+      const vp1 = page.getViewport({ scale: 1 });     // points (1/72 in)
+      const vpr = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = vpr.width; canvas.height = vpr.height;
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport: vpr }).promise;
+
+      await inpaintCanvas(canvas, worker, sl, tl,
+        (d, t) => setProgress(pagesDone + d / t, pdf.numPages), setMsg);
+      pagesDone++;
+      setProgress(pagesDone, pdf.numPages);
+
+      const jpg = canvas.toDataURL("image/jpeg", 0.92);
+      const wPt = vp1.width, hPt = vp1.height, orient = wPt > hPt ? "l" : "p";
+      if (!doc) doc = new jsPDF({ unit: "pt", format: [wPt, hPt], orientation: orient });
+      else doc.addPage([wPt, hPt], orient);
+      doc.addImage(jpg, "JPEG", 0, 0, wPt, hPt);
+    }
+  } finally { await worker.terminate(); }
+  setMsg("Finalising PDF…");
+  return doc.output("blob");
+}
+
+/* Image -> same image type, translated in place. */
+async function translateImageInPlace(file, sl, tl, setProgress, setMsg) {
+  const url = URL.createObjectURL(file);
+  const worker = await makeOcrWorker(setMsg);
+  try {
+    setMsg("Loading image…");
+    const image = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth || 1000; canvas.height = image.naturalHeight || 1000;
+    canvas.getContext("2d").drawImage(image, 0, 0);
+    await inpaintCanvas(canvas, worker, sl, tl, setProgress, setMsg);
+    const png = /\.png$/i.test(file.name) || /\.(tif|tiff|bmp|gif)$/i.test(file.name);
+    const type = png ? "image/png" : "image/jpeg";
+    setMsg("Saving image…");
+    const blob = await new Promise(r => canvas.toBlob(r, type, 0.95));
+    return { blob, ext: png ? ".png" : ".jpg" };
+  } finally { await worker.terminate(); URL.revokeObjectURL(url); }
 }
 
 /* ===========================================================================
@@ -513,7 +528,7 @@ function setFile(f) {
   filenameEl.textContent = "📎 " + f.name;
   const ext = extOf(f.name);
   if (ext === ".pdf" || IMG_EXT.includes(ext))
-    noteEl.textContent = "Returned as a Word (.docx) file, with the original page kept as the background.";
+    noteEl.textContent = "Same file type out — the page looks identical, only the text is translated in place.";
   else if (ext === ".docx" || ext === ".xlsx" || ext === ".txt")
     noteEl.textContent = "Original formatting will be preserved — same file type out.";
   else noteEl.textContent = "";
@@ -525,7 +540,7 @@ function setProgress(done, total) {
   const pct = Math.min(100, Math.round(100 * done / total));
   fill.style.width = pct + "%";
   msgEl.classList.remove("err");
-  setMsg("Translating… " + done + " / " + total + " segments (" + pct + "%)");
+  setMsg("Translating… " + pct + "%");
 }
 
 go.addEventListener("click", async () => {
@@ -557,17 +572,13 @@ go.addEventListener("click", async () => {
       blob = await translateTxt(chosen, sl, tl, setProgress, setMsg);
       outName = base + "_" + tl + ".txt";
     } else if (ext === ".pdf") {
-      const useOcr = document.getElementById("ocr").checked;
-      const keepBg = document.getElementById("keepbg").checked;
-      const pages = await extractPdfPages(chosen, useOcr, keepBg, setMsg);
-      blob = await buildDocxFromPages(pages, sl, tl, keepBg, setProgress, setMsg);
-      outName = base + "_" + tl + ".docx";
+      if (typeof window.jspdf === "undefined" || typeof Tesseract === "undefined") throw new Error("The PDF/OCR engine didn't load — check your connection and reload.");
+      blob = await translatePdfInPlace(chosen, sl, tl, setProgress, setMsg);
+      outName = base + "_" + tl + ".pdf";
     } else if (IMG_EXT.includes(ext)) {
-      const useOcr = document.getElementById("ocr").checked;
-      const keepBg = document.getElementById("keepbg").checked;
-      const pages = await extractImagePages(chosen, useOcr, keepBg, setMsg);
-      blob = await buildDocxFromPages(pages, sl, tl, keepBg, setProgress, setMsg);
-      outName = base + "_" + tl + ".docx";
+      if (typeof Tesseract === "undefined") throw new Error("The OCR engine didn't load — check your connection and reload.");
+      const r = await translateImageInPlace(chosen, sl, tl, setProgress, setMsg);
+      blob = r.blob; outName = base + "_" + tl + r.ext;
     } else if (ext === ".doc" || ext === ".xls") {
       throw new Error("Old ." + ext.slice(1) + " format isn't supported — please save as ." + ext.slice(1) + "x first.");
     } else {
