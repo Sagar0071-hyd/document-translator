@@ -59,7 +59,7 @@
 <body>
 <div class="wrap">
   <h1>📄 Document Translator</h1>
-  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, graphics, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text, <b>PDF stays PDF, images stay images</b>. For PDFs and images the words are read with OCR, erased, and the translation is painted back into the same spot on the page.</p>
+  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, graphics, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text, <b>PDF stays PDF, images stay images</b>. PDFs are translated from their real text — layout, fonts and pictures kept, images left as-is. Photos and scanned images are read with OCR and translated in place.</p>
 
   <div class="card">
     <div id="libwarn" class="warn hidden"></div>
@@ -573,9 +573,31 @@ go.addEventListener("click", async () => {
       blob = await translateTxt(chosen, sl, tl, setProgress, setMsg);
       outName = base + "_" + tl + ".txt";
     } else if (ext === ".pdf") {
-      if (typeof window.jspdf === "undefined" || typeof Tesseract === "undefined") throw new Error("The PDF/OCR engine didn't load — check your connection and reload.");
-      blob = await translatePdfInPlace(chosen, sl, tl, setProgress, setMsg);
       outName = base + "_" + tl + ".pdf";
+      let served = false;
+      try {
+        setMsg("Translating PDF on the server (keeps layout, fonts &amp; images)…");
+        fill.style.width = "35%";
+        const ab = await readArrayBuffer(chosen);
+        const resp = await fetch("/api/translate_pdf?sl=" + encodeURIComponent(sl) + "&tl=" + encodeURIComponent(tl),
+          { method: "POST", headers: { "Content-Type": "application/pdf" }, body: ab });
+        if (!resp.ok) {
+          let em = "server " + resp.status;
+          try { const j = await resp.json(); if (j.error) em = j.error; } catch (e) {}
+          throw new Error(em);
+        }
+        blob = await resp.blob();
+        if (!blob || blob.size < 500) throw new Error("empty server response");
+        served = true;
+        fill.style.width = "100%";
+      } catch (e) {
+        // Fallback: in-browser OCR (works offline / for scanned PDFs, lower fidelity)
+        console.warn("server PDF path failed, falling back to OCR:", e);
+        if (typeof window.jspdf === "undefined" || typeof Tesseract === "undefined")
+          throw new Error("PDF translation failed: " + e.message);
+        setMsg("Server unavailable — using in-browser OCR fallback…");
+        blob = await translatePdfInPlace(chosen, sl, tl, setProgress, setMsg);
+      }
     } else if (IMG_EXT.includes(ext)) {
       if (typeof Tesseract === "undefined") throw new Error("The OCR engine didn't load — check your connection and reload.");
       const r = await translateImageInPlace(chosen, sl, tl, setProgress, setMsg);
