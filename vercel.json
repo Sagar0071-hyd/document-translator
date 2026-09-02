@@ -1,6 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
+  "functions": {
+    "api/translate_pdf.py": { "maxDuration": 60 }
+  },
   "headers": [
     {
       "source": "/(.*)",
