@@ -574,28 +574,36 @@ go.addEventListener("click", async () => {
       outName = base + "_" + tl + ".txt";
     } else if (ext === ".pdf") {
       outName = base + "_" + tl + ".pdf";
-      let served = false;
       try {
-        setMsg("Translating PDF on the server (keeps layout, fonts &amp; images)…");
-        fill.style.width = "35%";
         const ab = await readArrayBuffer(chosen);
-        const resp = await fetch("/api/translate_pdf?sl=" + encodeURIComponent(sl) + "&tl=" + encodeURIComponent(tl),
+        // 1) server extracts the unique text blocks (no external calls there)
+        setMsg("Reading the PDF…");
+        const exResp = await fetch("/api/translate_pdf?mode=extract",
           { method: "POST", headers: { "Content-Type": "application/pdf" }, body: ab });
-        if (!resp.ok) {
-          let em = "server " + resp.status;
-          try { const j = await resp.json(); if (j.error) em = j.error; } catch (e) {}
-          throw new Error(em);
-        }
-        blob = await resp.blob();
-        if (!blob || blob.size < 500) throw new Error("empty server response");
-        served = true;
+        if (!exResp.ok) { let em = "extract " + exResp.status; try { em = (await exResp.json()).error; } catch (e) {} throw new Error(em); }
+        const texts = (await exResp.json()).texts || [];
+        if (!texts.length) throw new Error("no selectable text (looks scanned)");
+        // 2) translate every block here in the browser (Google works client-side)
+        const map = {};
+        let done = 0; const total = Math.max(texts.length, 1);
+        await pool(texts, 5, async (t) => { map[t] = await translate(t, sl, tl); done++; setProgress(done, total); });
+        // 3) server redraws the translations in place and returns the PDF
+        setMsg("Rebuilding the translated PDF…");
+        let bin = ""; const u8 = new Uint8Array(ab), CH = 0x8000;
+        for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+        const rResp = await fetch("/api/translate_pdf?mode=render",
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pdf: btoa(bin), map }) });
+        if (!rResp.ok) { let em = "render " + rResp.status; try { em = (await rResp.json()).error; } catch (e) {} throw new Error(em); }
+        blob = await rResp.blob();
+        if (!blob || blob.size < 500) throw new Error("empty render response");
         fill.style.width = "100%";
       } catch (e) {
-        // Fallback: in-browser OCR (works offline / for scanned PDFs, lower fidelity)
+        // Fallback: in-browser OCR (for scanned PDFs / if the server is unavailable)
         console.warn("server PDF path failed, falling back to OCR:", e);
         if (typeof window.jspdf === "undefined" || typeof Tesseract === "undefined")
           throw new Error("PDF translation failed: " + e.message);
-        setMsg("Server unavailable — using in-browser OCR fallback…");
+        setMsg("Using in-browser OCR (scanned PDF)…");
         blob = await translatePdfInPlace(chosen, sl, tl, setProgress, setMsg);
       }
     } else if (IMG_EXT.includes(ext)) {
