@@ -359,19 +359,20 @@ async function translateTxt(file, sl, tl, onProgress, setMsg) {
 
 const rgbStr = a => "rgb(" + a[0] + "," + a[1] + "," + a[2] + ")";
 
-/* Sample the background colour around a text box (its border pixels). Returns [r,g,b]. */
+/* Background colour: MEDIAN of pixels sampled just OUTSIDE the box (robust to
+   glyph edges and scan noise). Returns [r,g,b]. */
 function sampleBgColor(ctx, x0, y0, x1, y1) {
-  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const W = ctx.canvas.width, H = ctx.canvas.height, ring = 3;
   const cx = x => Math.max(0, Math.min(W - 1, x | 0));
   const cy = y => Math.max(0, Math.min(H - 1, y | 0));
-  const pts = [[x0, y0 - 1], [x1 - 1, y0 - 1], [x0, y1 + 1], [x1 - 1, y1 + 1],
-               [(x0 + x1) >> 1, y0 - 1], [(x0 + x1) >> 1, y1 + 1], [x0 - 1, (y0 + y1) >> 1], [x1 + 1, (y0 + y1) >> 1]];
-  let r = 0, g = 0, b = 0, n = 0;
-  for (const [px, py] of pts) {
-    try { const d = ctx.getImageData(cx(px), cy(py), 1, 1).data; r += d[0]; g += d[1]; b += d[2]; n++; } catch (e) {}
-  }
-  if (!n) return [255, 255, 255];
-  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+  const xs = [x0, (x0 + x1) >> 1, x1 - 1], ys = [y0, (y0 + y1) >> 1, y1 - 1];
+  const rs = [], gs = [], bs = [];
+  const take = (px, py) => { try { const d = ctx.getImageData(cx(px), cy(py), 1, 1).data; rs.push(d[0]); gs.push(d[1]); bs.push(d[2]); } catch (e) {} };
+  for (const px of xs) { take(px, y0 - ring); take(px, y1 + ring); }
+  for (const py of ys) { take(x0 - ring, py); take(x1 + ring, py); }
+  if (!rs.length) return [255, 255, 255];
+  const med = a => { a.sort((p, q) => p - q); return a[a.length >> 1]; };
+  return [med(rs), med(gs), med(bs)];
 }
 
 /* Text colour = the pixel inside the box that contrasts most with the background.
@@ -432,7 +433,7 @@ async function inpaintCanvas(canvas, worker, sl, tl, onProgress, setMsg) {
     ctx.fillStyle = rgbStr(bg);
     ctx.fillRect(x0 - 1, y0 - 1, boxW + 2, boxH + 2);
 
-    let fontSize = Math.max(6, Math.floor(boxH * 0.82));
+    let fontSize = Math.max(6, Math.floor(boxH * 0.74));
     ctx.fillStyle = rgbStr(fg);
     ctx.textBaseline = "bottom";
     ctx.font = fontSize + "px " + family;
@@ -452,7 +453,7 @@ async function makeOcrWorker(setMsg) {
 async function translatePdfInPlace(file, sl, tl, setProgress, setMsg) {
   const pdf = await pdfjsLib.getDocument({ data: await readArrayBuffer(file) }).promise;
   const { jsPDF } = window.jspdf;
-  const scale = 2;                 // render resolution for OCR quality
+  const scale = 3;                 // higher render resolution = crisper output
   let doc = null, pagesDone = 0;
   const worker = await makeOcrWorker(setMsg);
   try {
@@ -470,11 +471,11 @@ async function translatePdfInPlace(file, sl, tl, setProgress, setMsg) {
       pagesDone++;
       setProgress(pagesDone, pdf.numPages);
 
-      const jpg = canvas.toDataURL("image/jpeg", 0.92);
+      const png = canvas.toDataURL("image/png");   // lossless — no JPEG smearing
       const wPt = vp1.width, hPt = vp1.height, orient = wPt > hPt ? "l" : "p";
-      if (!doc) doc = new jsPDF({ unit: "pt", format: [wPt, hPt], orientation: orient });
+      if (!doc) doc = new jsPDF({ unit: "pt", format: [wPt, hPt], orientation: orient, compress: true });
       else doc.addPage([wPt, hPt], orient);
-      doc.addImage(jpg, "JPEG", 0, 0, wPt, hPt);
+      doc.addImage(png, "PNG", 0, 0, wPt, hPt);
     }
   } finally { await worker.terminate(); }
   setMsg("Finalising PDF…");
