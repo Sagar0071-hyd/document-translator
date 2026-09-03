@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 
 <style>
   :root{
@@ -59,7 +60,7 @@
 <body>
 <div class="wrap">
   <h1>📄 Document Translator</h1>
-  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, graphics, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text, <b>PDF stays PDF, images stay images</b>. PDFs are translated from their real text — layout, fonts and pictures kept, images left as-is. Photos and scanned images are read with OCR and translated in place.</p>
+  <p class="sub">Translates your document <b>in place</b> — the layout, formatting, tables, graphics, and images stay exactly the same, only the text changes. Word stays Word, Excel stays Excel, text stays text, <b>PDF stays PDF, images stay images</b>. PDFs are translated from their real text — layout, fonts and pictures kept, images left as-is; large PDFs are automatically split, translated, and stitched back into one file. Photos and scanned images are read with OCR and translated in place.</p>
 
   <div class="card">
     <div id="libwarn" class="warn hidden"></div>
@@ -502,6 +503,86 @@ async function translateImageInPlace(file, sl, tl, setProgress, setMsg) {
 }
 
 /* ===========================================================================
+   PDF via the server engine (extract on server → translate in browser →
+   redraw on server). Works on one chunk of PDF bytes; returns translated bytes.
+=========================================================================== */
+async function translatePdfChunk(bytes, sl, tl, onFrac) {
+  const u8 = (bytes instanceof Uint8Array) ? bytes : new Uint8Array(bytes);
+  // 1) server extracts unique text blocks (makes no external calls)
+  const ex = await fetch("/api/translate_pdf?mode=extract",
+    { method: "POST", headers: { "Content-Type": "application/pdf" }, body: u8 });
+  if (!ex.ok) { let em = "extract " + ex.status; try { em = (await ex.json()).error; } catch (e) {} throw new Error(em); }
+  const texts = (await ex.json()).texts || [];
+  if (!texts.length) throw new Error("no selectable text (looks scanned)");
+  // 2) translate every block here in the browser (Google works client-side)
+  const map = {};
+  let done = 0;
+  await pool(texts, 5, async (t) => { map[t] = await translate(t, sl, tl); done++; if (onFrac) onFrac(0.9 * done / texts.length); });
+  // 3) server redraws translations in place and returns the PDF bytes
+  let bin = ""; const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  const rr = await fetch("/api/translate_pdf?mode=render",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pdf: btoa(bin), map }) });
+  if (!rr.ok) { let em = "render " + rr.status; try { em = (await rr.json()).error; } catch (e) {} throw new Error(em); }
+  const out = new Uint8Array(await rr.arrayBuffer());
+  if (out.length < 500) throw new Error("empty render response");
+  if (onFrac) onFrac(1);
+  return out;
+}
+
+/* Small PDFs go straight through; large ones are split into page-range parts,
+   each translated within the free-tier limits, then stitched back into one PDF.
+   All splitting/merging happens here in the browser (pdf-lib) — always free. */
+async function translatePdfSmart(file, sl, tl, setProgress, setMsg) {
+  const ab = await readArrayBuffer(file);
+  const SAFE = 2.5 * 1024 * 1024;   // keep each part's upload comfortably under the server limit
+  const MAXP = 18;                  // and within the server time window
+
+  // Decide single-shot vs split (needs pdf-lib for page count / splitting)
+  let pageCount = null;
+  if (typeof PDFLib !== "undefined") {
+    try { pageCount = (await PDFLib.PDFDocument.load(ab, { ignoreEncryption: true })).getPageCount(); } catch (e) {}
+  }
+  const needsSplit = (typeof PDFLib !== "undefined") && pageCount !== null &&
+                     (file.size > SAFE || pageCount > MAXP);
+
+  if (!needsSplit) {
+    setMsg("Translating PDF…");
+    const out = await translatePdfChunk(ab, sl, tl, (f) => setProgress(f, 1));
+    return new Blob([out], { type: "application/pdf" });
+  }
+
+  // ---- Split path ----
+  const src = await PDFLib.PDFDocument.load(ab, { ignoreEncryption: true });
+  const N = src.getPageCount();
+  const perChunk = Math.max(1, Math.min(MAXP, Math.floor(SAFE / Math.max(1, file.size / N))));
+  const ranges = [];
+  for (let s = 0; s < N; s += perChunk) ranges.push([s, Math.min(N, s + perChunk)]);
+  setMsg("Large PDF (" + N + " pages) — splitting into " + ranges.length + " parts to stay on the free tier…");
+
+  const parts = [];
+  for (let ci = 0; ci < ranges.length; ci++) {
+    const [s, e] = ranges[ci];
+    setMsg("Translating part " + (ci + 1) + " of " + ranges.length + " (pages " + (s + 1) + "–" + e + ")…");
+    const cd = await PDFLib.PDFDocument.create();
+    const idxs = Array.from({ length: e - s }, (_, i) => s + i);
+    (await cd.copyPages(src, idxs)).forEach((p) => cd.addPage(p));
+    const chunkBytes = await cd.save();
+    const translated = await translatePdfChunk(chunkBytes, sl, tl, (f) => setProgress(ci + f, ranges.length));
+    parts.push(translated);
+  }
+
+  setMsg("Stitching the translated parts back together…");
+  const outDoc = await PDFLib.PDFDocument.create();
+  for (const pb of parts) {
+    const pd = await PDFLib.PDFDocument.load(pb);
+    (await outDoc.copyPages(pd, pd.getPageIndices())).forEach((p) => outDoc.addPage(p));
+  }
+  const finalBytes = await outDoc.save();
+  return new Blob([finalBytes], { type: "application/pdf" });
+}
+
+/* ===========================================================================
    UI wiring
 =========================================================================== */
 const drop = document.getElementById("drop");
@@ -575,28 +656,7 @@ go.addEventListener("click", async () => {
     } else if (ext === ".pdf") {
       outName = base + "_" + tl + ".pdf";
       try {
-        const ab = await readArrayBuffer(chosen);
-        // 1) server extracts the unique text blocks (no external calls there)
-        setMsg("Reading the PDF…");
-        const exResp = await fetch("/api/translate_pdf?mode=extract",
-          { method: "POST", headers: { "Content-Type": "application/pdf" }, body: ab });
-        if (!exResp.ok) { let em = "extract " + exResp.status; try { em = (await exResp.json()).error; } catch (e) {} throw new Error(em); }
-        const texts = (await exResp.json()).texts || [];
-        if (!texts.length) throw new Error("no selectable text (looks scanned)");
-        // 2) translate every block here in the browser (Google works client-side)
-        const map = {};
-        let done = 0; const total = Math.max(texts.length, 1);
-        await pool(texts, 5, async (t) => { map[t] = await translate(t, sl, tl); done++; setProgress(done, total); });
-        // 3) server redraws the translations in place and returns the PDF
-        setMsg("Rebuilding the translated PDF…");
-        let bin = ""; const u8 = new Uint8Array(ab), CH = 0x8000;
-        for (let i = 0; i < u8.length; i += CH) bin += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
-        const rResp = await fetch("/api/translate_pdf?mode=render",
-          { method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pdf: btoa(bin), map }) });
-        if (!rResp.ok) { let em = "render " + rResp.status; try { em = (await rResp.json()).error; } catch (e) {} throw new Error(em); }
-        blob = await rResp.blob();
-        if (!blob || blob.size < 500) throw new Error("empty render response");
+        blob = await translatePdfSmart(chosen, sl, tl, setProgress, setMsg);
         fill.style.width = "100%";
       } catch (e) {
         // Fallback: in-browser OCR (for scanned PDFs / if the server is unavailable)
