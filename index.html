@@ -535,8 +535,8 @@ async function translatePdfChunk(bytes, sl, tl, onFrac) {
    All splitting/merging happens here in the browser (pdf-lib) — always free. */
 async function translatePdfSmart(file, sl, tl, setProgress, setMsg) {
   const ab = await readArrayBuffer(file);
-  const SAFE = 2.5 * 1024 * 1024;   // keep each part's upload comfortably under the server limit
-  const MAXP = 18;                  // and within the server time window
+  const SAFE = 2.8 * 1024 * 1024;   // single-shot when the file is under this…
+  const MAXP = 50;                  // …and within the server time window (pages)
 
   // Load once with pdf-lib and reuse it — loading the SAME ArrayBuffer twice
   // makes pdf-lib hang, so we keep the single loaded document.
@@ -554,8 +554,11 @@ async function translatePdfSmart(file, sl, tl, setProgress, setMsg) {
   }
 
   // ---- Split path (reuse the already-loaded document) ----
+  // Use SMALL parts (≤6 pages, ≤1.6 MB): small rendered parts stitch back
+  // together reliably, whereas large parts can stall the in-browser merge.
   const N = pageCount;
-  const perChunk = Math.max(1, Math.min(MAXP, Math.floor(SAFE / Math.max(1, file.size / N))));
+  const CHUNK_BYTES = 1.6 * 1024 * 1024, CHUNK_PAGES = 6;
+  const perChunk = Math.max(1, Math.min(CHUNK_PAGES, Math.floor(CHUNK_BYTES / Math.max(1, file.size / N))));
   const ranges = [];
   for (let s = 0; s < N; s += perChunk) ranges.push([s, Math.min(N, s + perChunk)]);
   setMsg("Large PDF (" + N + " pages) — splitting into " + ranges.length + " parts to stay on the free tier…");
