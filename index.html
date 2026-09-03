@@ -538,13 +538,14 @@ async function translatePdfSmart(file, sl, tl, setProgress, setMsg) {
   const SAFE = 2.5 * 1024 * 1024;   // keep each part's upload comfortably under the server limit
   const MAXP = 18;                  // and within the server time window
 
-  // Decide single-shot vs split (needs pdf-lib for page count / splitting)
-  let pageCount = null;
+  // Load once with pdf-lib and reuse it — loading the SAME ArrayBuffer twice
+  // makes pdf-lib hang, so we keep the single loaded document.
+  let src = null, pageCount = null;
   if (typeof PDFLib !== "undefined") {
-    try { pageCount = (await PDFLib.PDFDocument.load(ab, { ignoreEncryption: true })).getPageCount(); } catch (e) {}
+    try { src = await PDFLib.PDFDocument.load(ab, { ignoreEncryption: true }); pageCount = src.getPageCount(); }
+    catch (e) { src = null; }
   }
-  const needsSplit = (typeof PDFLib !== "undefined") && pageCount !== null &&
-                     (file.size > SAFE || pageCount > MAXP);
+  const needsSplit = src !== null && (file.size > SAFE || pageCount > MAXP);
 
   if (!needsSplit) {
     setMsg("Translating PDF…");
@@ -552,9 +553,8 @@ async function translatePdfSmart(file, sl, tl, setProgress, setMsg) {
     return new Blob([out], { type: "application/pdf" });
   }
 
-  // ---- Split path ----
-  const src = await PDFLib.PDFDocument.load(ab, { ignoreEncryption: true });
-  const N = src.getPageCount();
+  // ---- Split path (reuse the already-loaded document) ----
+  const N = pageCount;
   const perChunk = Math.max(1, Math.min(MAXP, Math.floor(SAFE / Math.max(1, file.size / N))));
   const ranges = [];
   for (let s = 0; s < N; s += perChunk) ranges.push([s, Math.min(N, s + perChunk)]);
